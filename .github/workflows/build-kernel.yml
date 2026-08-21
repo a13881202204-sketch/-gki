@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       enable_susfs:
-        description: 启用SUSFS‑NG(内核文件/属性隐藏)
+        description: 启用SUSFS-NG(内核文件/属性隐藏)
         default: 'true'
         type: choice
         options:
@@ -24,58 +24,58 @@ jobs:
       - name: Checkout 当前仓库
         uses: actions/checkout@v4
 
-      - name: 【Linux官方原版主线源码】固定tag v6.6.77 torvalds/linux
+      - name: 拉取 Google ACK 官方 GKI 内核 固定 v6.6.77
         run: |
-          git clone --depth 1 --branch v6.6.77 https://github.com/torvalds/linux.git kernel
+          git clone --depth 1 --branch v6.6.77 https://android.googlesource.com/kernel/common kernel
           cd kernel
           git log -1 --oneline
 
-      - name: 拉取SukiSU‑Ultra main最新开发分支
+      - name: 拉取 SukiSU-Ultra main 最新开发分支
         run: |
-          git clone --depth 1 https://github.com/SukiSU‑Ultra/SukiSU‑Ultra suki
+          git clone --depth 1 https://github.com/SukiSU-Ultra/SukiSU-Ultra suki
 
-      - name: 拉取SUSFS‑NG / BBG / AnyKernel3 main
+      - name: 拉取 SUSFS-NG / BBG / AnyKernel3 main
         run: |
-          git clone --depth 1 https://github.com/SukiSU‑Ultra/SUSFS‑NG susfs
-          git clone --depth 1 https://github.com/SukiSU‑Ultra/BBG bbg
+          git clone --depth 1 https://github.com/SukiSU-Ultra/SUSFS-NG susfs
+          git clone --depth 1 https://github.com/SukiSU-Ultra/BBG bbg
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
 
-      - name: 应用SukiSU‑Ultra内核补丁(打在官方原版源码之上)
+      - name: 应用 SukiSU-Ultra 内核补丁
         working-directory: ./kernel
         run: |
           ../suki/kernel/patch.sh
 
-      - name: 应用SUSFS‑NG 完整VFS隐藏补丁
+      - name: 应用 SUSFS-NG 完整 VFS 隐藏补丁
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         working-directory: ./kernel
         run: |
           ../susfs/patch.sh
 
-      - name: 应用BBG BL伪回锁 + bootconfig/cmdline拦截补丁
+      - name: 应用 BBG BL伪回锁 + bootconfig/cmdline 拦截补丁
         if: ${{ github.event.inputs.enable_bbg == 'true' }}
         working-directory: ./kernel
         run: |
           ../bbg/patch.sh
 
-      - name: 下载Proton‑Clang编译器
+      - name: 下载 Proton-Clang 编译器
         run: |
-          git clone --depth 1 https://github.com/kdrag0n/proton-clang clang‑toolchain
+          git clone --depth 1 https://github.com/kdrag0n/proton-clang clang-toolchain
 
-      - name: 导入defconfig(ARM64 K90)
+      - name: 导入 defconfig (ARM64 K90)
         run: |
           cp ./defconfig kernel/arch/arm64/configs/my_defconfig
           cd kernel
           make O=out ARCH=arm64 my_defconfig
 
-      - name: 编译内核Image（基于官方v6.6.77源码+动态补丁）
+      - name: 编译内核 Image
         run: |
           cd kernel
-          make O=out ARCH=arm64 -j$(nproc) CC=../clang‑toolchain/bin/clang
+          make O=out ARCH=arm64 -j$(nproc) CC=../clang-toolchain/bin/clang
 
-      - name: 导出final.config
+      - name: 导出 final.config
         run: cp kernel/out/.config ./final.config
 
-      - name: 打包AnyKernel3刷机包
+      - name: 打包 AnyKernel3 刷机包
         run: |
           cp kernel/out/arch/arm64/boot/Image ak3/
           cd ak3
