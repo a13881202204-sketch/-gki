@@ -1,0 +1,86 @@
+name: Build My GKI Kernel
+on:
+  workflow_dispatch:
+    inputs:
+      enable_susfs:
+        description: 开启SUSFS‑NG
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      enable_bbg:
+        description: 开启BBG伪回锁补丁
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 当前仓库
+        uses: actions/checkout@v4
+
+      - name: 拉取Google官方ACK 6.6‑android15内核
+        run: |
+          git clone https://android.googlesource.com/kernel/common --branch common-android15-6.6 kernel
+
+      - name: 拉取SukiSU‑Ultra main最新开发分支(非release)
+        run: |
+          git clone --depth 1 https://github.com/SukiSU‑Ultra/SukiSU‑Ultra suki
+
+      - name: 拉取SUSFS‑NG / BBG / AnyKernel3官方main
+        run: |
+          git clone --depth 1 https://github.com/SukiSU‑Ultra/SUSFS‑NG susfs
+          git clone --depth 1 https://github.com/SukiSU‑Ultra/BBG bbg
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
+
+      - name: 应用SukiSU‑Ultra内核补丁
+        working-directory: ./kernel
+        run: |
+          ../suki/kernel/patch.sh
+      - name: 应用SUSFS‑NG
+        if: ${{ github.event.inputs.enable_susfs == 'true' }}
+        working-directory: ./kernel
+        run: |
+          ../susfs/patch.sh
+      - name: 应用BBG补丁
+        if: ${{ github.event.inputs.enable_bbg == 'true' }}
+        working-directory: ./kernel
+        run: |
+          ../bbg/patch.sh
+
+      - name: 下载Proton‑Clang官方编译器
+        run: |
+          git clone --depth 1 https://github.com/kdrag0n/proton-clang clang‑toolchain
+
+      - name: 导入你的defconfig(ARM64红米K90)
+        run: |
+          cp ./defconfig kernel/arch/arm64/configs/my_defconfig
+          cd kernel
+          make O=out ARCH=arm64 my_defconfig
+
+      - name: 编译内核
+        run: |
+          cd kernel
+          make O=out ARCH=arm64 -j$(nproc) CC=../clang‑toolchain/bin/clang
+
+      - name: 导出final.config
+        run: cp kernel/out/.config ./final.config
+
+      - name: 打包AnyKernel3 kexec刷机包
+        run: |
+          cp kernel/out/arch/arm64/boot/Image ak3/
+          cd ak3
+          zip -r ../AnyKernel3-my-kernel.zip *
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: |
+            final.config
+            AnyKernel3-my-kernel.zip
