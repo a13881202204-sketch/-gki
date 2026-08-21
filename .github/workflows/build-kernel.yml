@@ -24,14 +24,14 @@ jobs:
       - name: Checkout 当前仓库
         uses: actions/checkout@v4
 
-      - name: 安装repo工具，同步android15‑6.6‑2025‑03源码
+      - name: 安装依赖 + Repo，清华镜像浅同步内核
         run: |
           sudo apt-get update
-          sudo apt-get install -y repo
+          sudo apt-get install -y repo git python3
           mkdir -p kernel
           cd kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b android15-6.6-2025-03
-          repo sync -c -j$(nproc)
+          repo init -u https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/manifest.git -b android15-6.6-2025-03 --depth=1
+          repo sync -c --no-tags -j4
 
       - name: 校验内核版本
         run: |
@@ -67,7 +67,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/kdrag0n/proton-clang clang-toolchain
 
-      - name: 导入defconfig，追加额外内核开关
+      - name: 导入defconfig，追加内核开关
         run: |
           cp ./defconfig kernel/common/arch/arm64/configs/my_defconfig
           cd kernel/common
@@ -79,7 +79,7 @@ jobs:
       - name: 编译内核Image
         run: |
           cd kernel/common
-          make O=out ARCH=arm64 -j$(nproc) CC=../../clang-toolchain/bin/clang
+          make O=out ARCH=arm64 -j4 CC=../../clang-toolchain/bin/clang
 
       - name: 导出最终.config
         run: cp kernel/common/out/.config ./final.config
