@@ -3,14 +3,14 @@ on:
   workflow_dispatch:
     inputs:
       enable_susfs:
-        description: 启用SUSFS‑NG(内核文件/属性隐藏)
+        description: 启用SUSFS‑NG(内核文件伪装)
         default: 'true'
         type: choice
         options:
           - 'true'
           - 'false'
       enable_bbg:
-        description: 启用BBG(BL伪回锁、bootconfig/cmdline隐藏)
+        description: 启用BBG伪回锁补丁
         default: 'true'
         type: choice
         options:
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout 当前仓库
         uses: actions/checkout@v4
 
-      - name: 安装 repo 工具并同步 android15‑6.6‑2025‑03 (6.6.77)
+      - name: 安装repo工具，同步android15‑6.6‑2025‑03源码
         run: |
           sudo apt-get update
           sudo apt-get install -y repo
@@ -39,50 +39,54 @@ jobs:
           git log -1 --oneline
           make kernelversion
 
-      - name: 拉取 SukiSU‑Ultra / SUSFS‑NG / BBG / AnyKernel3
+      - name: 拉取SukiSU‑Ultra SUSFS‑NG BBG AnyKernel3
         run: |
           git clone --depth 1 https://github.com/SukiSU-Ultra/SukiSU-Ultra suki
           git clone --depth 1 https://github.com/SukiSU-Ultra/SUSFS-NG susfs
           git clone --depth 1 https://github.com/SukiSU-Ultra/BBG bbg
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
 
-      - name: 应用 SukiSU‑Ultra 内核补丁
+      - name: 应用SukiSU‑Ultra内核补丁
         working-directory: ./kernel/common
         run: |
           ../../suki/kernel/patch.sh
 
-      - name: 应用 SUSFS‑NG 完整VFS隐藏补丁
+      - name: 应用SUSFS‑NG补丁
         if: ${{ github.event.inputs.enable_susfs == 'true' }}
         working-directory: ./kernel/common
         run: |
           ../../susfs/patch.sh
 
-      - name: 应用 BBG BL伪回锁 + bootconfig/cmdline拦截补丁
+      - name: 应用BBG伪回锁补丁
         if: ${{ github.event.inputs.enable_bbg == 'true' }}
         working-directory: ./kernel/common
         run: |
           ../../bbg/patch.sh
 
-      - name: 下载 Proton‑Clang 编译器
+      - name: 下载Proton‑Clang编译器
         run: |
           git clone --depth 1 https://github.com/kdrag0n/proton-clang clang-toolchain
 
-      - name: 导入 defconfig (ARM64 K90)
+      - name: 导入defconfig，追加额外内核开关
         run: |
           cp ./defconfig kernel/common/arch/arm64/configs/my_defconfig
           cd kernel/common
           make O=out ARCH=arm64 my_defconfig
+          ./scripts/config --file out/.config --enable KALLSYMS
+          ./scripts/config --file out/.config --disable KSU_DEBUG
+          make O=out ARCH=arm64 olddefconfig
 
-      - name: 编译内核 Image
+      - name: 编译内核Image
         run: |
           cd kernel/common
           make O=out ARCH=arm64 -j$(nproc) CC=../../clang-toolchain/bin/clang
 
-      - name: 导出 final.config
+      - name: 导出最终.config
         run: cp kernel/common/out/.config ./final.config
 
-      - name: 打包 AnyKernel3 刷机包
+      - name: 组装AK3刷机包
         run: |
+          cp ./ak3-patch/anykernel.sh ak3/anykernel.sh
           cp kernel/common/out/arch/arm64/boot/Image ak3/
           cd ak3
           zip -r ../AnyKernel3-my-kernel.zip *
