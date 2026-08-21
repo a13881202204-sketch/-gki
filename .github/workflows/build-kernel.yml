@@ -24,9 +24,11 @@ jobs:
       - name: Checkout 当前仓库
         uses: actions/checkout@v4
 
-      - name: 拉取内核 固定tag v6.6.77 GitHub镜像
+      - name: 【Linux官方原版主线源码】固定tag v6.6.77 torvalds/linux
         run: |
-          git clone --depth 1 --branch v6.6.77 https://github.com/Android-Kernel/common.git kernel
+          git clone --depth 1 --branch v6.6.77 https://github.com/torvalds/linux.git kernel
+          cd kernel
+          git log -1 --oneline
 
       - name: 拉取SukiSU‑Ultra main最新开发分支
         run: |
@@ -38,7 +40,7 @@ jobs:
           git clone --depth 1 https://github.com/SukiSU‑Ultra/BBG bbg
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
 
-      - name: 应用SukiSU‑Ultra内核补丁
+      - name: 应用SukiSU‑Ultra内核补丁(打在官方原版源码之上)
         working-directory: ./kernel
         run: |
           ../suki/kernel/patch.sh
@@ -65,7 +67,7 @@ jobs:
           cd kernel
           make O=out ARCH=arm64 my_defconfig
 
-      - name: 编译内核Image
+      - name: 编译内核Image（基于官方v6.6.77源码+动态补丁）
         run: |
           cd kernel
           make O=out ARCH=arm64 -j$(nproc) CC=../clang‑toolchain/bin/clang
