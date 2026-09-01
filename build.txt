@@ -1,0 +1,554 @@
+name: Build K90 Kernel (SukiSU + SUSFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      susfs_branch:
+        description: 'SUSFS branch (gki-android16-6.6 or gki-android15-6.6)'
+        required: false
+        default: 'gki-android15-6.6'
+      sukisu_ref:
+        description: 'SukiSU commit/tag (leave empty for latest)'
+        required: false
+        default: ''
+      kernel_lto:
+        description: 'LTO mode (thin/full/none)'
+        required: false
+        default: 'thin'
+
+env:
+  DEVICE: annibale
+  KERNEL_BRANCH: annibale-w-oss
+  KERNEL_VERSION: "6.6"
+  ANDROID_VERSION: "16"
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: "[1/9] Checkout Repository"
+        run: |
+          echo "=========================================="
+          echo "  [1/9] Checkout Repository"
+          echo "=========================================="
+          echo "[INFO] Cloning build repository..."
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          echo "[OK] Repository files:"
+          ls -la
+          echo "[OK] Checkout complete"
+
+      - name: "[2/9] Install Build Dependencies"
+        run: |
+          echo "=========================================="
+          echo "  [2/9] Install Build Dependencies"
+          echo "=========================================="
+          echo "[INFO] Running apt-get update..."
+          sudo apt-get update
+          echo "[INFO] Installing build packages..."
+          sudo apt-get install -y \
+            build-essential bc bison flex cpio \
+            libssl-dev libncurses-dev libelf-dev \
+            wget curl rsync zip unzip python3 \
+            libxml2-utils dwarves zstd
+          echo "[OK] All dependencies installed:"
+          dpkg -l build-essential bison flex libssl-dev libelf-dev 2>/dev/null | grep '^ii' | awk '{print "  - "$2" "$3}'
+
+      - name: "[3/9] Setup Clang/LLVM Toolchain"
+        run: |
+          echo "=========================================="
+          echo "  [3/9] Setup Clang/LLVM Toolchain"
+          echo "=========================================="
+          CLANG_DIR="$HOME/toolchain/clang"
+          mkdir -p "$HOME/toolchain"
+          echo "[INFO] Downloading Android Clang prebuilt from AOSP..."
+          echo "[INFO] This is a large download (~2GB), please wait..."
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 "$CLANG_DIR"
+          echo "[OK] Clang downloaded"
+          CLANG_BIN=$(find "$CLANG_DIR" -maxdepth 1 -type d -name "clang-r*" | sort -V | tail -1)/bin
+          echo "[INFO] Clang version:"
+          "$CLANG_BIN/clang" --version
+          echo ""
+          echo "[INFO] Downloading aarch64 GNU binutils..."
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 "$HOME/toolchain/gcc"
+          echo "[OK] GNU binutils downloaded"
+          echo "[INFO] aarch64-gcc version:"
+          "$HOME/toolchain/gcc/bin/aarch64-linux-android-gcc" --version 2>/dev/null | head -3
+          echo ""
+          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+          echo "PATH=$HOME/toolchain/gcc/bin:$CLANG_BIN:$HOME/bin:$PATH" >> "$GITHUB_ENV"
+          echo "[OK] Toolchain setup complete"
+
+      - name: "[4/9] Clone Kernel Source"
+        run: |
+          echo "=========================================="
+          echo "  [4/9] Clone Kernel Source"
+          echo "=========================================="
+          KERNEL_DIR="$GITHUB_WORKSPACE/kernel"
+          mkdir -p "$KERNEL_DIR"
+
+          echo "[INFO] Checking MiCode/Xiaomi_Kernel_OpenSource for branch: $KERNEL_BRANCH..."
+          if git ls-remote --heads https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KERNEL_BRANCH" 2>/dev/null | grep -q "$KERNEL_BRANCH"; then
+            echo "[OK] Branch '$KERNEL_BRANCH' found!"
+            echo "[INFO] Cloning Xiaomi official kernel source (this may take several minutes)..."
+            git clone --depth=1 -b "$KERNEL_BRANCH" https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KERNEL_DIR"
+            echo "[OK] Xiaomi kernel source cloned"
+          else
+            echo "[SKIP] Branch '$KERNEL_BRANCH' not found in Xiaomi_Kernel_OpenSource"
+          fi
+
+          if [ ! -f "$KERNEL_DIR/Makefile" ]; then
+            echo "[INFO] No full source from Xiaomi. Trying kernel_build configs..."
+            git clone --depth=1 -b "$KERNEL_BRANCH" https://github.com/MiCode/kernel_build "$GITHUB_WORKSPACE/kernel_build_configs" 2>/dev/null || true
+
+            GKI_BRANCH="android${ANDROID_VERSION}-${KERNEL_VERSION}"
+            echo "[INFO] Trying GKI kernel branch: $GKI_BRANCH..."
+            if git ls-remote --heads https://android.googlesource.com/kernel/common "$GKI_BRANCH" 2>/dev/null | grep -q "$GKI_BRANCH"; then
+              echo "[OK] GKI branch found. Cloning (depth=200)..."
+              git clone --depth=200 -b "$GKI_BRANCH" https://android.googlesource.com/kernel/common "$KERNEL_DIR"
+            else
+              echo "[INFO] GKI branch '$GKI_BRANCH' not found, trying android15-6.6..."
+              git clone --depth=200 -b android15-6.6 https://android.googlesource.com/kernel/common "$KERNEL_DIR"
+            fi
+
+            if [ -d "$GITHUB_WORKSPACE/kernel_build_configs" ]; then
+              echo "[INFO] Copying device-specific configs..."
+              find "$GITHUB_WORKSPACE/kernel_build_configs" -name "*${DEVICE}*" -type f -exec cp -v {} "$KERNEL_DIR/arch/arm64/configs/" \; 2>/dev/null || true
+            fi
+          fi
+
+          echo ""
+          if [ -f "$KERNEL_DIR/Makefile" ]; then
+            KVER=$(grep '^VERSION' "$KERNEL_DIR/Makefile" | awk '{print $3}')
+            KPATCH=$(grep '^PATCHLEVEL' "$KERNEL_DIR/Makefile" | awk '{print $3}')
+            KSUBL=$(grep '^SUBLEVEL' "$KERNEL_DIR/Makefile" | awk '{print $3}')
+            echo "[OK] Kernel source version: ${KVER}.${KPATCH}.${KSUBL}"
+            echo "[INFO] Source directory size:"
+            du -sh "$KERNEL_DIR" 2>/dev/null
+            echo "[INFO] Top-level directories:"
+            ls -d "$KERNEL_DIR"/*/ 2>/dev/null | xargs -I{} basename {} | head -20
+            echo "KSRC=$KERNEL_DIR" >> "$GITHUB_ENV"
+          else
+            echo "[ERROR] No kernel source found! Cannot continue."
+            exit 1
+          fi
+
+      - name: "[5/9] Apply SUSFS Patches (Static Build)"
+        run: |
+          echo "=========================================="
+          echo "  [5/9] Apply SUSFS Patches (Static Build)"
+          echo "=========================================="
+          SUSFS_DIR="$GITHUB_WORKSPACE/susfs4ksu"
+          SUSFS_REPO="https://github.com/simonpunk/susfs4ksu.git"
+          SUSFS_BRANCH="${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
+
+          echo "[INFO] Cloning susfs4ksu (branch: $SUSFS_BRANCH)..."
+          if git ls-remote --heads "$SUSFS_REPO" "$SUSFS_BRANCH" 2>/dev/null | grep -q "$SUSFS_BRANCH"; then
+            git clone --depth=50 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$SUSFS_DIR"
+          else
+            echo "[INFO] Preferred branch not found, trying gki-android15-6.6..."
+            git clone --depth=50 -b gki-android15-6.6 "$SUSFS_REPO" "$SUSFS_DIR"
+          fi
+          echo "[OK] susfs4ksu cloned"
+          echo ""
+          echo "[INFO] Latest commit:"
+          cd "$SUSFS_DIR" && git log --oneline -5 && cd "$GITHUB_WORKSPACE"
+          echo ""
+
+          PATCHES="$SUSFS_DIR/kernel_patches"
+          KERNEL_DIR="$KSRC"
+
+          echo "[INFO] Patch files available:"
+          ls -la "$PATCHES/" 2>/dev/null || echo "  [WARN] kernel_patches directory not found"
+          echo ""
+
+          echo "--- [5a/3] Copying SUSFS source files ---"
+          if [ -d "$PATCHES/fs" ]; then
+            echo "[INFO] Copying fs/ files..."
+            cp -rv "$PATCHES/fs/"* "$KERNEL_DIR/fs/" 2>/dev/null
+            if [ -d "$KERNEL_DIR/common" ]; then
+              cp -rv "$PATCHES/fs/"* "$KERNEL_DIR/common/fs/" 2>/dev/null || true
+            fi
+          else
+            echo "[WARN] No fs/ directory in patches"
+          fi
+
+          if [ -d "$PATCHES/include/linux" ]; then
+            echo "[INFO] Copying include/linux/ files..."
+            cp -rv "$PATCHES/include/linux/"* "$KERNEL_DIR/include/linux/" 2>/dev/null
+            if [ -d "$KERNEL_DIR/common" ]; then
+              cp -rv "$PATCHES/include/linux/"* "$KERNEL_DIR/common/include/linux/" 2>/dev/null || true
+            fi
+          else
+            echo "[WARN] No include/linux/ directory in patches"
+          fi
+          echo "[OK] Source files copied"
+
+          echo ""
+          echo "--- [5b/3] Applying SUSFS kernel patches ---"
+          cd "$KERNEL_DIR"
+          if [ -d "common" ]; then cd common; fi
+
+          MAIN_PATCH=$(find "$PATCHES" -name "50_add_susfs_in_*.patch" | head -1)
+          if [ -n "$MAIN_PATCH" ]; then
+            echo "[INFO] Applying main SUSFS patch: $(basename "$MAIN_PATCH")"
+            echo "[INFO] Patch content preview:"
+            head -20 "$MAIN_PATCH"
+            echo "..."
+            if patch -p1 -ui "$MAIN_PATCH" 2>&1; then
+              echo "[OK] Main SUSFS patch applied successfully"
+            else
+              echo "[WARN] Main patch had issues. Retrying with --fuzz=3..."
+              if patch -p1 --fuzz=3 -ui "$MAIN_PATCH" 2>&1; then
+                echo "[OK] Main patch applied with fuzz"
+              else
+                echo "[WARN] Main patch failed. Check .rej files below:"
+                find . -name "*.rej" -exec echo "  REJ: {}" \; 2>/dev/null
+              fi
+            fi
+          else
+            echo "[WARN] No 50_add_susfs_in_*.patch found"
+          fi
+
+          echo ""
+          HOOKS_PATCH=$(find "$PATCHES" -name "60_scope-minimized_manual_hooks.patch" | head -1)
+          if [ -n "$HOOKS_PATCH" ]; then
+            echo "[INFO] Applying manual hooks patch: $(basename "$HOOKS_PATCH")"
+            if patch -p1 -ui "$HOOKS_PATCH" 2>&1; then
+              echo "[OK] Manual hooks patch applied successfully"
+            else
+              echo "[WARN] Hooks patch had issues. Retrying with --fuzz=3..."
+              if patch -p1 --fuzz=3 -ui "$HOOKS_PATCH" 2>&1; then
+                echo "[OK] Hooks patch applied with fuzz"
+              else
+                echo "[WARN] Hooks patch failed. Check .rej files:"
+                find . -name "*.rej" -exec echo "  REJ: {}" \; 2>/dev/null
+              fi
+            fi
+          else
+            echo "[WARN] No 60_scope-minimized_manual_hooks.patch found"
+          fi
+
+          echo ""
+          echo "--- [5c/3] Cleaning up ---"
+          rm -f 50_add_susfs_in_*.patch 60_scope-minimized_manual_hooks.patch 2>/dev/null || true
+          echo "[OK] Cleanup done"
+          echo "[OK] SUSFS patches step complete"
+
+      - name: "[6/9] Integrate SukiSU"
+        run: |
+          echo "=========================================="
+          echo "  [6/9] Integrate SukiSU"
+          echo "=========================================="
+          SUKISU_REF="${{ github.event.inputs.sukisu_ref }}"
+
+          cd "$KSRC"
+          if [ -d "common" ] && [ -d "common/drivers" ]; then cd common; fi
+
+          echo "[INFO] Downloading SukiSU setup.sh from GitHub..."
+          curl -sS https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh -o /tmp/sukisu_setup.sh
+          chmod +x /tmp/sukisu_setup.sh
+          echo "[OK] setup.sh downloaded ($(wc -l < /tmp/sukisu_setup.sh) lines)"
+
+          echo ""
+          if [ -n "$SUKISU_REF" ]; then
+            echo "[INFO] Running SukiSU setup with ref: $SUKISU_REF"
+            bash /tmp/sukisu_setup.sh "$SUKISU_REF" 2>&1
+          else
+            echo "[INFO] Running SukiSU setup (latest tag)..."
+            bash /tmp/sukisu_setup.sh 2>&1
+          fi
+
+          echo ""
+          echo "[INFO] Verifying SukiSU integration..."
+          if [ -L "drivers/kernelsu" ]; then
+            echo "[OK] SukiSU symlink verified: drivers/kernelsu -> $(readlink drivers/kernelsu)"
+          elif [ -d "KernelSU" ]; then
+            echo "[WARN] Symlink not found, but KernelSU/ exists. Creating manually..."
+            KSU_DIR=$(realpath "KernelSU/kernel" 2>/dev/null)
+            if [ -n "$KSU_DIR" ]; then
+              ln -sf "$KSU_DIR" drivers/kernelsu
+              grep -q "kernelsu" drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+              grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+                sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+              echo "[OK] SukiSU symlink created manually"
+            else
+              echo "[ERROR] Cannot find KernelSU/kernel directory!"
+              exit 1
+            fi
+          else
+            echo "[ERROR] SukiSU integration failed - no symlink and no KernelSU/ directory!"
+            exit 1
+          fi
+
+          echo ""
+          echo "[INFO] SukiSU kernel files:"
+          ls -la drivers/kernelsu/ 2>/dev/null | head -10
+          echo "[OK] SukiSU integration complete"
+
+      - name: "[7/9] Configure Kernel (defconfig + SukiSU + SUSFS)"
+        run: |
+          echo "=========================================="
+          echo "  [7/9] Configure Kernel"
+          echo "=========================================="
+          cd "$KSRC"
+          if [ -d "common" ] && [ -f "common/Makefile" ]; then cd common; fi
+
+          OUT_DIR="$KSRC/out"
+          mkdir -p "$OUT_DIR"
+
+          echo "[INFO] Searching for device defconfig..."
+          DEFCONFIG=""
+          for cfg in \
+            "arch/arm64/configs/${DEVICE}_user_defconfig" \
+            "arch/arm64/configs/${DEVICE}_defconfig" \
+            "arch/arm64/configs/vendor/${DEVICE}_user_defconfig" \
+            "arch/arm64/configs/gki_defconfig"; do
+            if [ -f "$cfg" ]; then
+              DEFCONFIG=$(basename "$cfg")
+              echo "[OK] Found defconfig: $cfg"
+              break
+            fi
+          done
+          if [ -z "$DEFCONFIG" ]; then
+            echo "[ERROR] No defconfig found!"
+            echo "[INFO] Available configs (first 30):"
+            ls arch/arm64/configs/ 2>/dev/null | head -30
+            exit 1
+          fi
+
+          echo ""
+          echo "[INFO] Running defconfig: $DEFCONFIG"
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$OUT_DIR" "$DEFCONFIG" 2>&1
+          echo "[OK] Defconfig loaded"
+
+          echo ""
+          echo "[INFO] Merging SukiSU + SUSFS config fragment (all =y static)..."
+          FRAGMENT="$GITHUB_WORKSPACE/ksu_susfs.fragment"
+          if [ -f "$FRAGMENT" ]; then
+            cp "$FRAGMENT" "$OUT_DIR/ksu_susfs.fragment"
+            echo "[INFO] Config fragment content:"
+            cat "$FRAGMENT"
+            echo ""
+            echo "[INFO] Applying config options..."
+            while IFS= read -r line; do
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              [[ -z "${line// }" ]] && continue
+              CNAME=$(echo "$line" | sed 's/=.*//;s/^CONFIG_//')
+              CVAL=$(echo "$line" | sed 's/.*=//')
+              if [ "$CVAL" = "y" ]; then
+                ./scripts/config --file "$OUT_DIR/.config" --enable "$CNAME" 2>/dev/null || true
+              fi
+            done < "$FRAGMENT"
+            echo "[OK] Config fragment applied"
+            echo "[INFO] Running olddefconfig to resolve dependencies..."
+            make ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$OUT_DIR" olddefconfig 2>&1
+          else
+            echo "[WARN] Config fragment not found at $FRAGMENT"
+          fi
+
+          echo ""
+          echo "[INFO] Setting kernel version string..."
+          ./scripts/config --file "$OUT_DIR/.config" --set-str LOCALVERSION "-K90-SukiSU-SUSFS" 2>/dev/null || true
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$OUT_DIR" olddefconfig 2>&1
+
+          echo ""
+          echo "[INFO] Verifying critical kernel configs..."
+          echo "-----------------------------------"
+          ALL_OK=true
+          for cfg in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_OVERLAYFS; do
+            if grep -q "^${cfg}=y" "$OUT_DIR/.config"; then
+              echo "  [OK]   $cfg=y"
+            else
+              echo "  [FAIL] $cfg is NOT set!"
+              ALL_OK=false
+            fi
+          done
+          echo "-----------------------------------"
+          if [ "$ALL_OK" = false ]; then
+            echo "[WARN] Some configs are missing! Continuing anyway..."
+            echo "[INFO] Full KSU/SUSFS config check:"
+            grep -i "KSU\|SUSFS" "$OUT_DIR/.config" 2>/dev/null || echo "  (no KSU/SUSFS configs found)"
+          else
+            echo "[OK] All critical configs verified!"
+          fi
+
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
+          echo "[OK] Kernel configuration complete"
+
+      - name: "[8/9] Build Kernel Image"
+        run: |
+          echo "=========================================="
+          echo "  [8/9] Build Kernel Image"
+          echo "=========================================="
+          LTO="${{ github.event.inputs.kernel_lto || 'thin' }}"
+
+          cd "$KSRC"
+          if [ -d "common" ] && [ -f "common/Makefile" ]; then cd common; fi
+
+          echo "[INFO] Build configuration:"
+          echo "  Compiler:  Clang/LLVM"
+          echo "  Jobs:      $(nproc)"
+          echo "  LTO:       $LTO"
+          echo "  Output:    $OUT_DIR"
+          echo ""
+          echo "[INFO] Starting kernel compilation..."
+          echo "[INFO] This is the longest step (15-40 minutes)"
+          echo "[INFO] Full compiler output will be shown below:"
+          echo "=========================================="
+          echo ""
+
+          BUILD_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=$OUT_DIR -j$(nproc)"
+          if [ "$LTO" != "none" ]; then
+            BUILD_ARGS="$BUILD_ARGS LTO=$LTO"
+          fi
+
+          make $BUILD_ARGS Image 2>&1
+
+          echo ""
+          echo "=========================================="
+          echo "[INFO] Checking for kernel image..."
+
+          KERNEL_IMAGE=""
+          for img in "$OUT_DIR/arch/arm64/boot/Image" "$OUT_DIR/arch/arm64/boot/Image.gz"; do
+            if [ -f "$img" ]; then
+              KERNEL_IMAGE="$img"
+              break
+            fi
+          done
+
+          if [ -z "$KERNEL_IMAGE" ]; then
+            echo "[ERROR] Kernel image not found!"
+            echo "[INFO] Contents of boot directory:"
+            ls -la "$OUT_DIR/arch/arm64/boot/" 2>/dev/null
+            exit 1
+          fi
+
+          SIZE=$(du -h "$KERNEL_IMAGE" | awk '{print $1}')
+          echo "[OK] Kernel image built: $(basename "$KERNEL_IMAGE") ($SIZE)"
+
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          cp -v "$KERNEL_IMAGE" "$GITHUB_WORKSPACE/output/Image"
+          echo "[OK] Kernel image copied to output"
+
+          echo ""
+          echo "[INFO] Attempting DTBO build..."
+          if make ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$OUT_DIR" dtbo.img 2>&1; then
+            if [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ]; then
+              cp -v "$OUT_DIR/arch/arm64/boot/dtbo.img" "$GITHUB_WORKSPACE/output/dtbo.img"
+              echo "[OK] DTBO image built and copied"
+            else
+              echo "[INFO] DTBO build completed but no dtbo.img found (normal for some kernels)"
+            fi
+          else
+            echo "[INFO] DTBO build not supported or failed (optional, continuing)"
+          fi
+
+          echo ""
+          echo "[INFO] Output directory contents:"
+          ls -lah "$GITHUB_WORKSPACE/output/"
+          echo "[OK] Kernel build step complete"
+
+      - name: "[9/9] Package AnyKernel3 ZIP"
+        run: |
+          echo "=========================================="
+          echo "  [9/9] Package AnyKernel3 ZIP"
+          echo "=========================================="
+          AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/output"
+
+          echo "[INFO] Cloning AnyKernel3..."
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$AK3_DIR"
+          echo "[OK] AnyKernel3 cloned"
+
+          echo ""
+          echo "[INFO] Writing K90-specific AnyKernel3 config..."
+          printf '%s\n' \
+            '# AnyKernel3 - Redmi K90 (annibale) - SukiSU + SUSFS static' \
+            'kernel.string=K90-Annibale-SukiSU-SUSFS' \
+            'do.backup=1' \
+            'do.boot.bin=1' \
+            'do.system_mount=0' \
+            'do.vendor_mount=0' \
+            'do.modules=0' \
+            'do.dtbo=1' \
+            'do.gitzip=0' \
+            'do.patchvbmeta=0' \
+            'block=auto' \
+            'is_slot_device=auto' \
+            'do.resetvbmeta=0' \
+            'kernel_dir=/lib/modules/3.69.0' \
+            > "$AK3_DIR/anykernel3.sh"
+          echo "[OK] Config written:"
+          cat "$AK3_DIR/anykernel3.sh"
+
+          echo ""
+          echo "[INFO] Copying kernel image to AnyKernel3..."
+          if [ ! -f "$OUTPUT_DIR/Image" ]; then
+            echo "[ERROR] Kernel image not found at $OUTPUT_DIR/Image!"
+            exit 1
+          fi
+          cp -v "$OUTPUT_DIR/Image" "$AK3_DIR/Image"
+          echo "[OK] Kernel image copied"
+
+          if [ -f "$OUTPUT_DIR/dtbo.img" ]; then
+            echo "[INFO] Copying DTBO image..."
+            cp -v "$OUTPUT_DIR/dtbo.img" "$AK3_DIR/dtbo.img"
+          else
+            echo "[INFO] No DTBO image (skipping)"
+          fi
+
+          echo ""
+          ZIP_NAME="AnyKernel3_K90_SukiSU_SUSFS_$(date '+%Y%m%d_%H%M').zip"
+          echo "[INFO] Creating flashable zip: $ZIP_NAME"
+          cd "$AK3_DIR"
+          zip -r9 "$OUTPUT_DIR/$ZIP_NAME" . -x ".git/*" "*.bak" "anykernel3.sh.bak" 2>&1
+          cd "$GITHUB_WORKSPACE"
+
+          ZIP_SIZE=$(du -h "$OUTPUT_DIR/$ZIP_NAME" | awk '{print $1}')
+          echo ""
+          echo "[OK] Flashable zip created: $ZIP_NAME ($ZIP_SIZE)"
+          echo "[INFO] Zip contents:"
+          unzip -l "$OUTPUT_DIR/$ZIP_NAME" 2>/dev/null | head -20
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "[OK] AnyKernel3 packaging complete"
+
+      - name: Upload Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: K90-Kernel-SukiSU-SUSFS
+          path: output/*.zip
+          retention-days: 30
+          compression-level: 0
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "============================================"
+          echo "  K90 Kernel Build - Final Summary"
+          echo "============================================"
+          echo "  Device:       Redmi K90 Standard (annibale)"
+          echo "  Kernel:       $KERNEL_VERSION (Android $ANDROID_VERSION)"
+          echo "  SUSFS:        static (built-in, all =y)"
+          echo "  SukiSU ref:   ${{ github.event.inputs.sukisu_ref || 'latest' }}"
+          echo "  SUSFS branch: ${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
+          echo "  LTO:          ${{ github.event.inputs.kernel_lto || 'thin' }}"
+          echo ""
+          if ls output/*.zip 1>/dev/null 2>&1; then
+            echo "  Status:       SUCCESS"
+            echo "  Artifact:     K90-Kernel-SukiSU-SUSFS"
+            echo "  Download from the Artifacts section below"
+          else
+            echo "  Status:       FAILED"
+            echo "  Check the failed step above for error details"
+            echo "  Common fixes:"
+            echo "    - Network timeout: just rerun the workflow"
+            echo "    - Patch conflict: check .rej files in the SUSFS step log"
+            echo "    - Build error: search for 'error:' in the Build step log"
+          fi
+          echo "============================================"
