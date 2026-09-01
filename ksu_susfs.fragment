@@ -1,0 +1,28 @@
+# ============================================================
+# SukiSU + SUSFS Kernel Config Fragment
+# For Redmi K90 (annibale) - Static (built-in) SUSFS
+# ============================================================
+
+# SukiSU (KernelSU fork)
+CONFIG_KSU=y
+
+# SUSFS - Static (all built-in, not modules)
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_ADD_PATH_KSU=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_PATHS=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_KSTATFS=y
+CONFIG_KSU_SUSFS_SUS_QUOTA=y
+
+# KPM (Kernel Patch Module) support - optional
+# CONFIG_KPM=y
+
+# Networking improvements (optional)
+# CONFIG_TCP_CONGESTION_DEFAULT=y
+# CONFIG_DEFAULT_BBR=y
